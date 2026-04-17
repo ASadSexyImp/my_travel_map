@@ -4746,34 +4746,182 @@ return orthographicDepthToViewZ(depth,cameraNear,cameraFar);
           uniform float effectType;
           attribute float aPhase;
           
+          varying vec3 vTargetColor;
+          varying float vNoise;
+          varying float vIntensity;
+
+          // Simplex 3D Noise loosely
+          vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x, 289.0);}
+          vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
+          float snoise(vec3 v){ 
+              const vec2 C = vec2(1.0/6.0, 1.0/3.0) ;
+              const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+              vec3 i  = floor(v + dot(v, C.yyy) );
+              vec3 x0 = v - i + dot(i, C.xxx) ;
+              vec3 g = step(x0.yzx, x0.xyz);
+              vec3 l = 1.0 - g;
+              vec3 i1 = min( g.xyz, l.zxy );
+              vec3 i2 = max( g.xyz, l.zxy );
+              vec3 x1 = x0 - i1 + 1.0 * C.xxx;
+              vec3 x2 = x0 - i2 + 2.0 * C.xxx;
+              vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
+              i = mod(i, 289.0 ); 
+              vec4 p = permute( permute( permute( 
+                         i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+                       + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) 
+                       + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+              float n_ = 1.0/7.0; // N=7
+              vec3 ns = n_ * D.wyz - D.xzx;
+              vec4 j = p - 49.0 * floor(p * ns.z *ns.z);
+              vec4 x_ = floor(j * ns.z);
+              vec4 y_ = floor(j - 7.0 * x_ );
+              vec4 x = x_ *ns.x + ns.yyyy;
+              vec4 y = y_ *ns.x + ns.yyyy;
+              vec4 h = 1.0 - abs(x) - abs(y);
+              vec4 b0 = vec4( x.xy, y.xy );
+              vec4 b1 = vec4( x.zw, y.zw );
+              vec4 s0 = floor(b0)*2.0 + 1.0;
+              vec4 s1 = floor(b1)*2.0 + 1.0;
+              vec4 sh = -step(h, vec4(0.0));
+              vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+              vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+              vec3 p0 = vec3(a0.xy,h.x);
+              vec3 p1 = vec3(a0.zw,h.y);
+              vec3 p2 = vec3(a1.xy,h.z);
+              vec3 p3 = vec3(a1.zw,h.w);
+              vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+              p0 *= norm.x;
+              p1 *= norm.y;
+              p2 *= norm.z;
+              p3 *= norm.w;
+              vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+              m = m * m;
+              return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+          }
+
+          // Curl Noise for fluid dynamics (Fire, Water, Snow)
+          vec3 snoiseVec3( vec3 x ){
+              float s  = snoise(vec3( x ));
+              float s1 = snoise(vec3( x.y - 19.1, x.z + 33.4, x.x + 47.2 ));
+              float s2 = snoise(vec3( x.z + 74.2, x.x - 124.5, x.y + 99.4 ));
+              return vec3( s, s1, s2 );
+          }
+          vec3 curlNoise( vec3 p ){
+              const float e = 0.1;
+              vec3 dx = vec3( e   , 0.0 , 0.0 );
+              vec3 dy = vec3( 0.0 , e   , 0.0 );
+              vec3 dz = vec3( 0.0 , 0.0 , e   );
+              vec3 p_x0 = snoiseVec3( p - dx );
+              vec3 p_x1 = snoiseVec3( p + dx );
+              vec3 p_y0 = snoiseVec3( p - dy );
+              vec3 p_y1 = snoiseVec3( p + dy );
+              vec3 p_z0 = snoiseVec3( p - dz );
+              vec3 p_z1 = snoiseVec3( p + dz );
+              float x = p_y1.z - p_y0.z - p_z1.y + p_z0.y;
+              float y = p_z1.x - p_z0.x - p_x1.z + p_x0.z;
+              float z = p_x1.y - p_x0.y - p_y1.x + p_y0.x;
+              const float divisor = 1.0 / ( 2.0 * e );
+              return normalize( vec3( x , y , z ) * divisor );
+          }
+
+          // Cosine based palette 
+          vec3 palette( in float t, in vec3 a, in vec3 b, in vec3 c, in vec3 d ) {
+              return a + b*cos( 6.28318*(c*t+d) );
+          }
+          
           void main() {
               vec3 pos = position;
               float pSize = 1.0;
+              
+              float n = snoise(vec3(pos.x * 0.15, pos.z * 0.15, time * 0.2));
+              vNoise = n;
+              vIntensity = 0.0;
 
               if (effectType > 0.5 && effectType < 1.5) {
-                  // Fire
-                  float fireT = time * 2.0 + aPhase * 20.0;
-                  pos.y += fract(fireT) * clamp(aPhase, 0.0, 1.0) * 1.5; 
-                  pos.x += sin(fireT * 3.0) * 0.05;
-                  pSize = 2.0;
+                  // ================= FIRE =================
+                  // Aggressive rising turbulence
+                  float fireSpeed = time * 3.0 + aPhase * 10.0;
+                  vec3 fireCurl = curlNoise(vec3(pos.x * 2.0, pos.y + fireSpeed, pos.z * 2.0));
+                  
+                  // Endless rising fragments (0.0 to 1.0 loop, but continuous spread)
+                  float rise = fract(aPhase + time * 0.6); 
+                  float elevation = rise * 4.0;
+                  
+                  pos.y += elevation;
+                  // Flame tapers off and becomes more chaotic at the tip
+                  pos.x += fireCurl.x * (elevation * 0.3);
+                  pos.z += fireCurl.z * (elevation * 0.3);
+                  
+                  vIntensity = 1.0 - rise;       // 1.0 at origin, fades to 0.0 at top
+                  pSize = 3.0 * vIntensity + 0.5; // Bigger base, thin tail
+
               } else if (effectType > 1.5 && effectType < 2.5) {
-                  // Water
-                  pos.y += sin(pos.x * 2.0 + time * 3.0) * 0.2 + cos(pos.z * 1.5 + time * 2.0) * 0.2;
-                  pSize = 1.5;
+                  // ================= WATER =================
+                  // Flowing currents and swells
+                  vec3 waterCurl = curlNoise(vec3(pos.x * 0.8, pos.y, pos.z * 0.8) + time * 0.4);
+                  
+                  float ripple = sin(length(pos.xz) * 3.0 - time * 4.0) * 0.15;
+                  pos.y += ripple + waterCurl.y * 0.4;
+                  
+                  // Swirling horizontal drift mimicking water rings
+                  pos.x += waterCurl.x * 0.5;
+                  pos.z += waterCurl.z * 0.5;
+                  
+                  vIntensity = clamp((ripple + waterCurl.y * 0.4 + 0.2) / 0.4, 0.0, 1.0); // Crest indicator
+                  pSize = 1.5 + vIntensity * 2.0;
+
               } else if (effectType > 2.5 && effectType < 3.5) {
-                  // Snow
-                  pos.y += mod(time * 0.3 + aPhase, 1.0) * 0.5;
-                  pSize = 1.0 + step(0.9, sin(time * 5.0 + aPhase * 10.0)) * 2.0;
+                  // ================= SNOW =================
+                  // Blustery winds
+                  float snowSpeed = time * 1.5 + aPhase * 20.0;
+                  vec3 snowCurl = curlNoise(vec3(pos.x * 1.5, pos.y - snowSpeed, pos.z * 1.5));
+                  
+                  float drop = mod(aPhase * 5.0 - time * 0.8, 3.0); 
+                  pos.y -= drop;
+                  
+                  // Lateral wind gusts
+                  pos.x += snowCurl.x * 0.8 + sin(time + aPhase) * 0.4;
+                  pos.z += snowCurl.z * 0.8 + cos(time * 0.9 + aPhase) * 0.4;
+                  
+                  // Twinkling flakes
+                  vIntensity = pow(sin(time * 6.0 + aPhase * 50.0) * 0.5 + 0.5, 3.0);
+                  pSize = 1.0 + vIntensity * 2.5;
+
               } else if (effectType > 3.5 && effectType < 4.5) {
-                  // Festival
-                  float beat = fract(time * 2.0);
-                  pos += normalize(vec3(sin(aPhase*100.0), 1.0, cos(aPhase*100.0))) * beat * 0.2;
-                  pSize = 2.0 * (1.0 - beat + 0.5);
+                  // ================= FESTIVAL =================
+                  // Drum beats / fireworks expansion
+                  float beat = fract(time * 1.8); 
+                  float pBeat = pow(1.0 - beat, 4.0); // Sharp transient
+                  
+                  vec3 originVec = normalize(vec3(pos.x, 0.01, pos.z));
+                  float burstNoise = snoise(vec3(pos.x * 3.0, pos.z * 3.0, time));
+                  
+                  pos.x += originVec.x * pBeat * (1.2 + burstNoise * 0.8);
+                  pos.z += originVec.z * pBeat * (1.2 + burstNoise * 0.8);
+                  pos.y += pBeat * 0.8 + burstNoise * 0.3;
+                  
+                  vIntensity = pBeat;
+                  pSize = 1.0 + pBeat * 4.0;
+
               } else {
-                  // Default subtle pulse and wave
-                  pSize = 0.8 + sin(time * 0.5 + aPhase * 20.0) * 0.5;
-                  pos.y += sin(time * 1.5 + pos.x * 2.0 + pos.z) * 0.03;
+                  // Default subtle pulse and wave + Noise Displacement
+                  pSize = 1.0 + sin(time * 0.5 + aPhase * 20.0) * 0.5;
+                  
+                  // Glitch elevation spikes
+                  float glitch = smoothstep(0.65, 0.95, snoise(vec3(pos.x * 0.8, pos.z * 0.8, time * 1.5)));
+                  pos.y += n * 0.3 + glitch * 0.6;
+                  pos.x += glitch * 0.15;
               }
+
+              // Color Iridescence (Cyberpunk tones)
+              vec3 a = vec3(0.5, 0.5, 0.5);
+              vec3 b = vec3(0.5, 0.5, 0.5);
+              vec3 c = vec3(1.0, 1.0, 1.0);
+              vec3 d = vec3(0.263,0.416,0.557); 
+              
+              vec3 iridescent = palette(n * 0.5 + time * 0.1 + aPhase, a, b, c, d);
+              
+              vTargetColor = iridescent;
 
               vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
               gl_Position = projectionMatrix * mvPosition;
@@ -4782,12 +4930,65 @@ return orthographicDepthToViewZ(depth,cameraNear,cameraFar);
       `,fragmentShader:`
           uniform vec3 baseColor;
           uniform float particleOpacity;
+          uniform float effectType;
+          
+          varying vec3 vTargetColor;
+          varying float vNoise;
+          varying float vIntensity;
+
           void main() {
               vec2 xy = gl_PointCoord.xy - vec2(0.5);
               float ll = length(xy);
-              if(ll > 0.5) discard;
+              if (ll > 0.5) discard;
+              
               float alpha = 1.0 - (ll * 2.0);
-              gl_FragColor = vec4(baseColor, alpha * particleOpacity);
+              vec3 finalColor;
+
+              if (effectType > 0.5 && effectType < 1.5) {
+                  // FIRE: Core is white/yellow, mid is orange, tip is crimson
+                  vec3 fireCore = vec3(1.0, 0.9, 0.4);
+                  vec3 fireMid = vec3(1.0, 0.4, 0.0);
+                  vec3 fireTip = vec3(0.8, 0.0, 0.0);
+                  
+                  if (vIntensity > 0.5) {
+                      finalColor = mix(fireMid, fireCore, (vIntensity - 0.5) * 2.0);
+                  } else {
+                      finalColor = mix(fireTip, fireMid, vIntensity * 2.0);
+                  }
+                  alpha *= vIntensity * 1.5;
+
+              } else if (effectType > 1.5 && effectType < 2.5) {
+                  // WATER: Deep blue to cyan foam
+                  vec3 waterDeep = vec3(0.0, 0.3, 0.9);
+                  vec3 waterFoam = vec3(0.6, 1.0, 1.0);
+                  finalColor = mix(waterDeep, waterFoam, vIntensity);
+                  alpha *= 0.6 + vIntensity * 0.6;
+
+              } else if (effectType > 2.5 && effectType < 3.5) {
+                  // SNOW: Ice blue core with white glow
+                  vec3 snowMist = vec3(0.6, 0.85, 1.0);
+                  vec3 snowCore = vec3(1.0, 1.0, 1.0);
+                  finalColor = mix(snowMist, snowCore, vIntensity);
+                  alpha *= 0.7 + vIntensity * 0.5;
+
+              } else if (effectType > 3.5 && effectType < 4.5) {
+                  // FESTIVAL: Neon bursts (Pink to Yellow)
+                  vec3 neonSpark = vec3(1.0, 0.1, 0.5);
+                  vec3 sparkGlow = vec3(1.0, 0.9, 0.2);
+                  finalColor = mix(neonSpark, sparkGlow, vIntensity);
+                  alpha *= vIntensity * 2.0;
+
+              } else {
+                  // DEFAULT
+                  // Noise discard (Glitch / Disintegration map degradation)
+                  float randomDiscard = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+                  if (vNoise > 0.7 && randomDiscard > 0.4) {
+                      discard; 
+                  }
+                  finalColor = mix(baseColor, vTargetColor, 0.65);
+              }
+
+              gl_FragColor = vec4(finalColor, clamp(alpha * particleOpacity, 0.0, 1.0));
           }
       `,transparent:!0,blending:2,depthWrite:!1}),dN=()=>{let e=(0,b.useMemo)(()=>{let e=.6,t=[],n=[];for(let r=-60;r<=60;r+=e)for(let i=-60;i<=60;i+=e)t.push(r,-1,i),n.push(Math.random());let r=new Zi;return r.setAttribute(`position`,new K(t,3)),r.setAttribute(`aRand`,new K(n,1)),r},[]),t=(0,b.useRef)();return v_(e=>{t.current&&(t.current.uniforms.time.value=e.clock.elapsedTime)}),(0,Z.jsx)(`points`,{geometry:e,material:(0,b.useMemo)(()=>new ba({uniforms:{time:{value:0}},vertexShader:`
             uniform float time;
@@ -4795,43 +4996,117 @@ return orthographicDepthToViewZ(depth,cameraNear,cameraFar);
             varying float vAlpha;
             varying vec3 vColor;
             
-            float hash(float n) { return fract(sin(n) * 1e4); }
-            float noise(vec3 x) {
-                const vec3 step = vec3(110, 241, 171);
-                vec3 i = floor(x);
-                vec3 f = fract(x);
-                float n = dot(i, step);
-                vec3 u = f * f * (3.0 - 2.0 * f);
-                return mix(mix(mix( hash(n + dot(step, vec3(0, 0, 0))), hash(n + dot(step, vec3(1, 0, 0))), u.x),
-                               mix( hash(n + dot(step, vec3(0, 1, 0))), hash(n + dot(step, vec3(1, 1, 0))), u.x), u.y),
-                           mix(mix( hash(n + dot(step, vec3(0, 0, 1))), hash(n + dot(step, vec3(1, 0, 1))), u.x),
-                               mix( hash(n + dot(step, vec3(0, 1, 1))), hash(n + dot(step, vec3(1, 1, 1))), u.x), u.y), u.z);
+            // Simplex Noise
+            vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x, 289.0);}
+            vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
+            float snoise(vec3 v){ 
+                const vec2 C = vec2(1.0/6.0, 1.0/3.0) ;
+                const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+                vec3 i  = floor(v + dot(v, C.yyy) );
+                vec3 x0 = v - i + dot(i, C.xxx) ;
+                vec3 g = step(x0.yzx, x0.xyz);
+                vec3 l = 1.0 - g;
+                vec3 i1 = min( g.xyz, l.zxy );
+                vec3 i2 = max( g.xyz, l.zxy );
+                vec3 x1 = x0 - i1 + 1.0 * C.xxx;
+                vec3 x2 = x0 - i2 + 2.0 * C.xxx;
+                vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
+                i = mod(i, 289.0 ); 
+                vec4 p = permute( permute( permute( 
+                           i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+                         + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) 
+                         + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+                float n_ = 1.0/7.0;
+                vec3 ns = n_ * D.wyz - D.xzx;
+                vec4 j = p - 49.0 * floor(p * ns.z *ns.z);
+                vec4 x_ = floor(j * ns.z);
+                vec4 y_ = floor(j - 7.0 * x_ );
+                vec4 x = x_ *ns.x + ns.yyyy;
+                vec4 y = y_ *ns.x + ns.yyyy;
+                vec4 h = 1.0 - abs(x) - abs(y);
+                vec4 b0 = vec4( x.xy, y.xy );
+                vec4 b1 = vec4( x.zw, y.zw );
+                vec4 s0 = floor(b0)*2.0 + 1.0;
+                vec4 s1 = floor(b1)*2.0 + 1.0;
+                vec4 sh = -step(h, vec4(0.0));
+                vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+                vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+                vec3 p0 = vec3(a0.xy,h.x);
+                vec3 p1 = vec3(a0.zw,h.y);
+                vec3 p2 = vec3(a1.xy,h.z);
+                vec3 p3 = vec3(a1.zw,h.w);
+                vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+                p0 *= norm.x;
+                p1 *= norm.y;
+                p2 *= norm.z;
+                p3 *= norm.w;
+                vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+                m = m * m;
+                return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+            }
+
+            // Curl Noise for Fluid Dynamics
+            vec3 snoiseVec3( vec3 x ){
+                float s  = snoise(vec3( x ));
+                float s1 = snoise(vec3( x.y - 19.1, x.z + 33.4, x.x + 47.2 ));
+                float s2 = snoise(vec3( x.z + 74.2, x.x - 124.5, x.y + 99.4 ));
+                return vec3( s, s1, s2 );
+            }
+            
+            vec3 curlNoise( vec3 p ){
+                const float e = 0.1;
+                vec3 dx = vec3( e   , 0.0 , 0.0 );
+                vec3 dy = vec3( 0.0 , e   , 0.0 );
+                vec3 dz = vec3( 0.0 , 0.0 , e   );
+
+                vec3 p_x0 = snoiseVec3( p - dx );
+                vec3 p_x1 = snoiseVec3( p + dx );
+                vec3 p_y0 = snoiseVec3( p - dy );
+                vec3 p_y1 = snoiseVec3( p + dy );
+                vec3 p_z0 = snoiseVec3( p - dz );
+                vec3 p_z1 = snoiseVec3( p + dz );
+
+                float x = p_y1.z - p_y0.z - p_z1.y + p_z0.y;
+                float y = p_z1.x - p_z0.x - p_x1.z + p_x0.z;
+                float z = p_x1.y - p_x0.y - p_y1.x + p_y0.x;
+
+                const float divisor = 1.0 / ( 2.0 * e );
+                return normalize( vec3( x , y , z ) * divisor );
             }
 
             void main() {
                 vec3 pos = position;
                 
-                // Wavy sea motion using noise and trig
-                float wave = sin(pos.x * 0.2 + time * 1.5) * cos(pos.z * 0.2 + time * 0.8) * 0.4;
-                float n = noise(vec3(pos.x * 0.1, time * 0.5, pos.z * 0.1));
-                pos.y += wave + n * 0.8;
+                // Extremely organic fluid flow using Curl Noise
+                vec3 curl = curlNoise(vec3(pos.x * 0.05, pos.y, pos.z * 0.05) + time * 0.15);
+                
+                // Displacement
+                pos.x += curl.x * 2.5;
+                pos.z += curl.z * 2.5;
+                
+                // Elevation affected by the fluid turbulence
+                pos.y += curl.y * 1.8;
+                
+                // Base slow swell layer
+                float wave = sin(pos.x * 0.1 + time * 0.5) * cos(pos.z * 0.1 + time * 0.3) * 0.4;
+                pos.y += wave;
                 
                 // Color variation by elevation
-                float heightRatio = clamp((pos.y + 1.0) * 0.8, 0.0, 1.0);
-                vec3 colDark = vec3(0.0, 0.1, 0.4);   // Deep blue troughs
-                vec3 colLight = vec3(0.0, 0.8, 1.0);  // Cyan crests
-                vColor = mix(colDark, colLight, heightRatio);
+                float heightRatio = clamp((pos.y + 1.0) * 0.5 + 0.2, 0.0, 1.0);
+                vec3 colDark = vec3(0.01, 0.04, 0.15);    // Deep abyssal void
+                vec3 colLight = vec3(0.0, 0.9, 1.0);      // High energy cyan
+                vColor = mix(colDark, colLight, heightRatio * (0.5 + aRand * 0.5));
                 
                 vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
                 gl_Position = projectionMatrix * mvPosition;
                 
-                // Responsive point sizing
-                gl_PointSize = (1.5 + aRand) * (18.0 / -mvPosition.z);
+                // Responsive point sizing - brighter points are larger
+                gl_PointSize = (1.5 + heightRatio * 2.5 + aRand * 1.5) * (18.0 / -mvPosition.z);
                 
                 // Seamless radial fade
                 float dist = length(pos.xz);
-                float edgeFade = smoothstep(55.0, 30.0, dist);
-                vAlpha = edgeFade * (0.3 + heightRatio * 0.4); 
+                float edgeFade = smoothstep(55.0, 20.0, dist);
+                vAlpha = edgeFade * (0.05 + heightRatio * 0.7); 
             }
         `,fragmentShader:`
             varying float vAlpha;

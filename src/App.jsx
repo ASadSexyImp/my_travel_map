@@ -3,7 +3,7 @@ import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber';
 import { MapControls, Html, Stars, Line, Billboard, Grid } from '@react-three/drei';
 import * as THREE from 'three';
 import { motion, AnimatePresence } from 'framer-motion';
-import { EffectComposer, Bloom, Noise, Glitch } from '@react-three/postprocessing';
+import { EffectComposer, Bloom, Noise, Glitch, DepthOfField } from '@react-three/postprocessing';
 import { GlitchMode } from 'postprocessing'; 
 import { locations as originalLocations } from './parsedLocations';
 import YouTube from 'react-youtube';
@@ -112,30 +112,182 @@ const mapShaderMaterial = new THREE.ShaderMaterial({
           uniform float effectType;
           attribute float aPhase;
           
+          varying vec3 vTargetColor;
+          varying float vNoise;
+          varying float vIntensity;
+
+          // Simplex 3D Noise loosely
+          vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x, 289.0);}
+          vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
+          float snoise(vec3 v){ 
+              const vec2 C = vec2(1.0/6.0, 1.0/3.0) ;
+              const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+              vec3 i  = floor(v + dot(v, C.yyy) );
+              vec3 x0 = v - i + dot(i, C.xxx) ;
+              vec3 g = step(x0.yzx, x0.xyz);
+              vec3 l = 1.0 - g;
+              vec3 i1 = min( g.xyz, l.zxy );
+              vec3 i2 = max( g.xyz, l.zxy );
+              vec3 x1 = x0 - i1 + 1.0 * C.xxx;
+              vec3 x2 = x0 - i2 + 2.0 * C.xxx;
+              vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
+              i = mod(i, 289.0 ); 
+              vec4 p = permute( permute( permute( 
+                         i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+                       + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) 
+                       + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+              float n_ = 1.0/7.0; // N=7
+              vec3 ns = n_ * D.wyz - D.xzx;
+              vec4 j = p - 49.0 * floor(p * ns.z *ns.z);
+              vec4 x_ = floor(j * ns.z);
+              vec4 y_ = floor(j - 7.0 * x_ );
+              vec4 x = x_ *ns.x + ns.yyyy;
+              vec4 y = y_ *ns.x + ns.yyyy;
+              vec4 h = 1.0 - abs(x) - abs(y);
+              vec4 b0 = vec4( x.xy, y.xy );
+              vec4 b1 = vec4( x.zw, y.zw );
+              vec4 s0 = floor(b0)*2.0 + 1.0;
+              vec4 s1 = floor(b1)*2.0 + 1.0;
+              vec4 sh = -step(h, vec4(0.0));
+              vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+              vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+              vec3 p0 = vec3(a0.xy,h.x);
+              vec3 p1 = vec3(a0.zw,h.y);
+              vec3 p2 = vec3(a1.xy,h.z);
+              vec3 p3 = vec3(a1.zw,h.w);
+              vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+              p0 *= norm.x;
+              p1 *= norm.y;
+              p2 *= norm.z;
+              p3 *= norm.w;
+              vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+              m = m * m;
+              return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+          }
+
+          // Curl Noise for fluid dynamics (Fire, Water, Snow)
+          vec3 snoiseVec3( vec3 x ){
+              float s  = snoise(vec3( x ));
+              float s1 = snoise(vec3( x.y - 19.1, x.z + 33.4, x.x + 47.2 ));
+              float s2 = snoise(vec3( x.z + 74.2, x.x - 124.5, x.y + 99.4 ));
+              return vec3( s, s1, s2 );
+          }
+          vec3 curlNoise( vec3 p ){
+              const float e = 0.1;
+              vec3 dx = vec3( e   , 0.0 , 0.0 );
+              vec3 dy = vec3( 0.0 , e   , 0.0 );
+              vec3 dz = vec3( 0.0 , 0.0 , e   );
+              vec3 p_x0 = snoiseVec3( p - dx );
+              vec3 p_x1 = snoiseVec3( p + dx );
+              vec3 p_y0 = snoiseVec3( p - dy );
+              vec3 p_y1 = snoiseVec3( p + dy );
+              vec3 p_z0 = snoiseVec3( p - dz );
+              vec3 p_z1 = snoiseVec3( p + dz );
+              float x = p_y1.z - p_y0.z - p_z1.y + p_z0.y;
+              float y = p_z1.x - p_z0.x - p_x1.z + p_x0.z;
+              float z = p_x1.y - p_x0.y - p_y1.x + p_y0.x;
+              const float divisor = 1.0 / ( 2.0 * e );
+              return normalize( vec3( x , y , z ) * divisor );
+          }
+
+          // Cosine based palette 
+          vec3 palette( in float t, in vec3 a, in vec3 b, in vec3 c, in vec3 d ) {
+              return a + b*cos( 6.28318*(c*t+d) );
+          }
+          
           void main() {
               vec3 pos = position;
-              float pSize = 3.5;
+              float pSize = 1.0;
+              
+              float n = snoise(vec3(pos.x * 0.15, pos.z * 0.15, time * 0.2));
+              vNoise = n;
+              vIntensity = 0.0;
 
               if (effectType > 0.5 && effectType < 1.5) {
-                  // Fire: particles moving up, breaking shape a bit
-                  float fireT = time * 2.0 + aPhase * 20.0;
-                  pos.y += fract(fireT) * clamp(aPhase, 0.0, 1.0) * 1.5; 
-                  pos.x += sin(fireT * 3.0) * 0.05;
-                  pSize = 5.0;
+                  // ================= FIRE =================
+                  // Aggressive rising turbulence
+                  float fireSpeed = time * 3.0 + aPhase * 10.0;
+                  vec3 fireCurl = curlNoise(vec3(pos.x * 2.0, pos.y + fireSpeed, pos.z * 2.0));
+                  
+                  // Endless rising fragments (0.0 to 1.0 loop, but continuous spread)
+                  float rise = fract(aPhase + time * 0.6); 
+                  float elevation = rise * 4.0;
+                  
+                  pos.y += elevation;
+                  // Flame tapers off and becomes more chaotic at the tip
+                  pos.x += fireCurl.x * (elevation * 0.3);
+                  pos.z += fireCurl.z * (elevation * 0.3);
+                  
+                  vIntensity = 1.0 - rise;       // 1.0 at origin, fades to 0.0 at top
+                  pSize = 3.0 * vIntensity + 0.5; // Bigger base, thin tail
+
               } else if (effectType > 1.5 && effectType < 2.5) {
-                  // Water: smooth undulating waves
-                  pos.y += sin(pos.x * 2.0 + time * 3.0) * 0.2 + cos(pos.z * 1.5 + time * 2.0) * 0.2;
-                  pSize = 4.0;
+                  // ================= WATER =================
+                  // Flowing currents and swells
+                  vec3 waterCurl = curlNoise(vec3(pos.x * 0.8, pos.y, pos.z * 0.8) + time * 0.4);
+                  
+                  float ripple = sin(length(pos.xz) * 3.0 - time * 4.0) * 0.15;
+                  pos.y += ripple + waterCurl.y * 0.4;
+                  
+                  // Swirling horizontal drift mimicking water rings
+                  pos.x += waterCurl.x * 0.5;
+                  pos.z += waterCurl.z * 0.5;
+                  
+                  vIntensity = clamp((ripple + waterCurl.y * 0.4 + 0.2) / 0.4, 0.0, 1.0); // Crest indicator
+                  pSize = 1.5 + vIntensity * 2.0;
+
               } else if (effectType > 2.5 && effectType < 3.5) {
-                  // Snow: soft rising, expanding occasionally
-                  pos.y += mod(time * 0.3 + aPhase, 1.0) * 0.5;
-                  pSize = 3.0 + step(0.9, sin(time * 5.0 + aPhase * 10.0)) * 3.0;
+                  // ================= SNOW =================
+                  // Blustery winds
+                  float snowSpeed = time * 1.5 + aPhase * 20.0;
+                  vec3 snowCurl = curlNoise(vec3(pos.x * 1.5, pos.y - snowSpeed, pos.z * 1.5));
+                  
+                  float drop = mod(aPhase * 5.0 - time * 0.8, 3.0); 
+                  pos.y -= drop;
+                  
+                  // Lateral wind gusts
+                  pos.x += snowCurl.x * 0.8 + sin(time + aPhase) * 0.4;
+                  pos.z += snowCurl.z * 0.8 + cos(time * 0.9 + aPhase) * 0.4;
+                  
+                  // Twinkling flakes
+                  vIntensity = pow(sin(time * 6.0 + aPhase * 50.0) * 0.5 + 0.5, 3.0);
+                  pSize = 1.0 + vIntensity * 2.5;
+
               } else if (effectType > 3.5 && effectType < 4.5) {
-                  // Festival: bursting 
-                  float beat = fract(time * 2.0);
-                  pos += normalize(vec3(sin(aPhase*100.0), 1.0, cos(aPhase*100.0))) * beat * 0.2;
-                  pSize = 4.5 * (1.0 - beat + 0.5);
+                  // ================= FESTIVAL =================
+                  // Drum beats / fireworks expansion
+                  float beat = fract(time * 1.8); 
+                  float pBeat = pow(1.0 - beat, 4.0); // Sharp transient
+                  
+                  vec3 originVec = normalize(vec3(pos.x, 0.01, pos.z));
+                  float burstNoise = snoise(vec3(pos.x * 3.0, pos.z * 3.0, time));
+                  
+                  pos.x += originVec.x * pBeat * (1.2 + burstNoise * 0.8);
+                  pos.z += originVec.z * pBeat * (1.2 + burstNoise * 0.8);
+                  pos.y += pBeat * 0.8 + burstNoise * 0.3;
+                  
+                  vIntensity = pBeat;
+                  pSize = 1.0 + pBeat * 4.0;
+
+              } else {
+                  // Default subtle pulse and wave + Noise Displacement
+                  pSize = 1.0 + sin(time * 0.5 + aPhase * 20.0) * 0.5;
+                  
+                  // Glitch elevation spikes
+                  float glitch = smoothstep(0.65, 0.95, snoise(vec3(pos.x * 0.8, pos.z * 0.8, time * 1.5)));
+                  pos.y += n * 0.3 + glitch * 0.6;
+                  pos.x += glitch * 0.15;
               }
+
+              // Color Iridescence (Cyberpunk tones)
+              vec3 a = vec3(0.5, 0.5, 0.5);
+              vec3 b = vec3(0.5, 0.5, 0.5);
+              vec3 c = vec3(1.0, 1.0, 1.0);
+              vec3 d = vec3(0.263,0.416,0.557); 
+              
+              vec3 iridescent = palette(n * 0.5 + time * 0.1 + aPhase, a, b, c, d);
+              
+              vTargetColor = iridescent;
 
               vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
               gl_Position = projectionMatrix * mvPosition;
@@ -145,18 +297,304 @@ const mapShaderMaterial = new THREE.ShaderMaterial({
       fragmentShader: `
           uniform vec3 baseColor;
           uniform float particleOpacity;
+          uniform float effectType;
+          
+          varying vec3 vTargetColor;
+          varying float vNoise;
+          varying float vIntensity;
+
           void main() {
               vec2 xy = gl_PointCoord.xy - vec2(0.5);
               float ll = length(xy);
-              if(ll > 0.5) discard;
+              if (ll > 0.5) discard;
+              
               float alpha = 1.0 - (ll * 2.0);
-              gl_FragColor = vec4(baseColor, alpha * particleOpacity);
+              vec3 finalColor;
+
+              if (effectType > 0.5 && effectType < 1.5) {
+                  // FIRE: Core is white/yellow, mid is orange, tip is crimson
+                  vec3 fireCore = vec3(1.0, 0.9, 0.4);
+                  vec3 fireMid = vec3(1.0, 0.4, 0.0);
+                  vec3 fireTip = vec3(0.8, 0.0, 0.0);
+                  
+                  if (vIntensity > 0.5) {
+                      finalColor = mix(fireMid, fireCore, (vIntensity - 0.5) * 2.0);
+                  } else {
+                      finalColor = mix(fireTip, fireMid, vIntensity * 2.0);
+                  }
+                  alpha *= vIntensity * 1.5;
+
+              } else if (effectType > 1.5 && effectType < 2.5) {
+                  // WATER: Deep blue to cyan foam
+                  vec3 waterDeep = vec3(0.0, 0.3, 0.9);
+                  vec3 waterFoam = vec3(0.6, 1.0, 1.0);
+                  finalColor = mix(waterDeep, waterFoam, vIntensity);
+                  alpha *= 0.6 + vIntensity * 0.6;
+
+              } else if (effectType > 2.5 && effectType < 3.5) {
+                  // SNOW: Ice blue core with white glow
+                  vec3 snowMist = vec3(0.6, 0.85, 1.0);
+                  vec3 snowCore = vec3(1.0, 1.0, 1.0);
+                  finalColor = mix(snowMist, snowCore, vIntensity);
+                  alpha *= 0.7 + vIntensity * 0.5;
+
+              } else if (effectType > 3.5 && effectType < 4.5) {
+                  // FESTIVAL: Neon bursts (Pink to Yellow)
+                  vec3 neonSpark = vec3(1.0, 0.1, 0.5);
+                  vec3 sparkGlow = vec3(1.0, 0.9, 0.2);
+                  finalColor = mix(neonSpark, sparkGlow, vIntensity);
+                  alpha *= vIntensity * 2.0;
+
+              } else {
+                  // DEFAULT
+                  // Noise discard (Glitch / Disintegration map degradation)
+                  float randomDiscard = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+                  if (vNoise > 0.7 && randomDiscard > 0.4) {
+                      discard; 
+                  }
+                  finalColor = mix(baseColor, vTargetColor, 0.65);
+              }
+
+              gl_FragColor = vec4(finalColor, clamp(alpha * particleOpacity, 0.0, 1.0));
           }
       `,
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false
 });
+
+const DigitalOcean = () => {
+    // Generate a massive 2D grid
+    const geometry = useMemo(() => {
+        const minX = -60, maxX = 60;
+        const minZ = -60, maxZ = 60;
+        const step = 0.6; // About 40,000 particles
+        const newPoints = [];
+        const rands = [];
+        
+        for(let x=minX; x<=maxX; x+=step) {
+            for(let z=minZ; z<=maxZ; z+=step) {
+                newPoints.push(x, -1.0, z); // Y=-1.0 to place it below the Japan map
+                rands.push(Math.random());
+            }
+        }
+        
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(newPoints, 3));
+        geo.setAttribute('aRand', new THREE.Float32BufferAttribute(rands, 1));
+        return geo;
+    }, []);
+
+    const materialRef = useRef();
+
+    useFrame((state) => {
+        if(materialRef.current) {
+            materialRef.current.uniforms.time.value = state.clock.elapsedTime;
+        }
+    });
+
+    const mat = useMemo(() => new THREE.ShaderMaterial({
+        uniforms: {
+            time: { value: 0 }
+        },
+        vertexShader: `
+            uniform float time;
+            attribute float aRand;
+            varying float vAlpha;
+            varying vec3 vColor;
+            
+            // Simplex Noise
+            vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x, 289.0);}
+            vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
+            float snoise(vec3 v){ 
+                const vec2 C = vec2(1.0/6.0, 1.0/3.0) ;
+                const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+                vec3 i  = floor(v + dot(v, C.yyy) );
+                vec3 x0 = v - i + dot(i, C.xxx) ;
+                vec3 g = step(x0.yzx, x0.xyz);
+                vec3 l = 1.0 - g;
+                vec3 i1 = min( g.xyz, l.zxy );
+                vec3 i2 = max( g.xyz, l.zxy );
+                vec3 x1 = x0 - i1 + 1.0 * C.xxx;
+                vec3 x2 = x0 - i2 + 2.0 * C.xxx;
+                vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
+                i = mod(i, 289.0 ); 
+                vec4 p = permute( permute( permute( 
+                           i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+                         + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) 
+                         + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+                float n_ = 1.0/7.0;
+                vec3 ns = n_ * D.wyz - D.xzx;
+                vec4 j = p - 49.0 * floor(p * ns.z *ns.z);
+                vec4 x_ = floor(j * ns.z);
+                vec4 y_ = floor(j - 7.0 * x_ );
+                vec4 x = x_ *ns.x + ns.yyyy;
+                vec4 y = y_ *ns.x + ns.yyyy;
+                vec4 h = 1.0 - abs(x) - abs(y);
+                vec4 b0 = vec4( x.xy, y.xy );
+                vec4 b1 = vec4( x.zw, y.zw );
+                vec4 s0 = floor(b0)*2.0 + 1.0;
+                vec4 s1 = floor(b1)*2.0 + 1.0;
+                vec4 sh = -step(h, vec4(0.0));
+                vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+                vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+                vec3 p0 = vec3(a0.xy,h.x);
+                vec3 p1 = vec3(a0.zw,h.y);
+                vec3 p2 = vec3(a1.xy,h.z);
+                vec3 p3 = vec3(a1.zw,h.w);
+                vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+                p0 *= norm.x;
+                p1 *= norm.y;
+                p2 *= norm.z;
+                p3 *= norm.w;
+                vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+                m = m * m;
+                return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+            }
+
+            // Curl Noise for Fluid Dynamics
+            vec3 snoiseVec3( vec3 x ){
+                float s  = snoise(vec3( x ));
+                float s1 = snoise(vec3( x.y - 19.1, x.z + 33.4, x.x + 47.2 ));
+                float s2 = snoise(vec3( x.z + 74.2, x.x - 124.5, x.y + 99.4 ));
+                return vec3( s, s1, s2 );
+            }
+            
+            vec3 curlNoise( vec3 p ){
+                const float e = 0.1;
+                vec3 dx = vec3( e   , 0.0 , 0.0 );
+                vec3 dy = vec3( 0.0 , e   , 0.0 );
+                vec3 dz = vec3( 0.0 , 0.0 , e   );
+
+                vec3 p_x0 = snoiseVec3( p - dx );
+                vec3 p_x1 = snoiseVec3( p + dx );
+                vec3 p_y0 = snoiseVec3( p - dy );
+                vec3 p_y1 = snoiseVec3( p + dy );
+                vec3 p_z0 = snoiseVec3( p - dz );
+                vec3 p_z1 = snoiseVec3( p + dz );
+
+                float x = p_y1.z - p_y0.z - p_z1.y + p_z0.y;
+                float y = p_z1.x - p_z0.x - p_x1.z + p_x0.z;
+                float z = p_x1.y - p_x0.y - p_y1.x + p_y0.x;
+
+                const float divisor = 1.0 / ( 2.0 * e );
+                return normalize( vec3( x , y , z ) * divisor );
+            }
+
+            void main() {
+                vec3 pos = position;
+                
+                // Extremely organic fluid flow using Curl Noise
+                vec3 curl = curlNoise(vec3(pos.x * 0.05, pos.y, pos.z * 0.05) + time * 0.15);
+                
+                // Displacement
+                pos.x += curl.x * 2.5;
+                pos.z += curl.z * 2.5;
+                
+                // Elevation affected by the fluid turbulence
+                pos.y += curl.y * 1.8;
+                
+                // Base slow swell layer
+                float wave = sin(pos.x * 0.1 + time * 0.5) * cos(pos.z * 0.1 + time * 0.3) * 0.4;
+                pos.y += wave;
+                
+                // Color variation by elevation
+                float heightRatio = clamp((pos.y + 1.0) * 0.5 + 0.2, 0.0, 1.0);
+                vec3 colDark = vec3(0.01, 0.04, 0.15);    // Deep abyssal void
+                vec3 colLight = vec3(0.0, 0.9, 1.0);      // High energy cyan
+                vColor = mix(colDark, colLight, heightRatio * (0.5 + aRand * 0.5));
+                
+                vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+                gl_Position = projectionMatrix * mvPosition;
+                
+                // Responsive point sizing - brighter points are larger
+                gl_PointSize = (1.5 + heightRatio * 2.5 + aRand * 1.5) * (18.0 / -mvPosition.z);
+                
+                // Seamless radial fade
+                float dist = length(pos.xz);
+                float edgeFade = smoothstep(55.0, 20.0, dist);
+                vAlpha = edgeFade * (0.05 + heightRatio * 0.7); 
+            }
+        `,
+        fragmentShader: `
+            varying float vAlpha;
+            varying vec3 vColor;
+            void main() {
+                vec2 xy = gl_PointCoord.xy - vec2(0.5);
+                float ll = length(xy);
+                if(ll > 0.5) discard;
+                gl_FragColor = vec4(vColor, vAlpha * pow(1.0 - ll * 2.0, 2.0));
+            }
+        `,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    }), []);
+
+    return <points geometry={geometry} material={mat} />
+};
+
+// --- メディアアート：コンステレーション（星座）エフェクト ---
+const ConstellationEffect = ({ activeLocations }) => {
+    // Only render constellation if a filter is active
+    if (!activeLocations || activeLocations.length < 2 || activeLocations.length > locations.length - 5) return null;
+    
+    const lines = useMemo(() => {
+       const vectors = activeLocations.map(l => {
+           const [x,y,z] = convertGeoToVector(l.lat, l.lng, true);
+           return new THREE.Vector3(x, 0.05, z); 
+       });
+       
+       const pts = [];
+       vectors.forEach((v1, i) => {
+           let distances = vectors.map((v2, j) => ({ j, d: v1.distanceTo(v2) }));
+           distances.sort((a,b) => a.d - b.d);
+           // Connect to 2 closest neighbors for a beautiful web
+           for(let k = 1; k <= 2; k++) {
+               if(distances[k] && distances[k].d < 10) { 
+                   const v2 = vectors[distances[k].j];
+                   const mid = v1.clone().lerp(v2, 0.5);
+                   mid.y += distances[k].d * 0.15; 
+                   const curve = new THREE.QuadraticBezierCurve3(v1, mid, v2);
+                   const curvePts = curve.getPoints(10);
+                   for(let p=0; p<curvePts.length-1; p++) {
+                       pts.push(curvePts[p].x, curvePts[p].y, curvePts[p].z);
+                       pts.push(curvePts[p+1].x, curvePts[p+1].y, curvePts[p+1].z);
+                   }
+               }
+           }
+       });
+       return new Float32Array(pts);
+    }, [activeLocations]);
+
+    if(lines.length === 0) return null;
+
+    return (
+       <lineSegments>
+           <bufferGeometry>
+               <bufferAttribute attach="attributes-position" array={lines} count={lines.length / 3} itemSize={3} />
+           </bufferGeometry>
+           <lineBasicMaterial color="#00ffff" transparent opacity={0.35} blending={THREE.AdditiveBlending} />
+       </lineSegments>
+    );
+};
+
+// --- メディアアート：シネマティックカメラ・エフェクト ---
+const SceneEffects = ({ glitchActive }) => {
+   return (
+     <EffectComposer disableNormalPass>
+       <Bloom luminanceThreshold={0.8} intensity={1.5} mipmapBlur />
+       <Noise opacity={0.03} />
+       <Glitch 
+         active={glitchActive} 
+         mode={GlitchMode.CONSTANT_WILD} 
+         delay={[0, 0]} 
+         duration={[0.1, 0.3]} 
+         strength={[0.3, 0.8]} 
+       />
+     </EffectComposer>
+   );
+};
 
 // --- カメラドリフト機能 ---
 const CameraDrift = ({ hoveredLocation, isIdle }) => {
@@ -347,7 +785,7 @@ const WorldMapShape = ({ activeLocation, globalCategory }) => {
       });
 
       const newPoints = [];
-      const stepSize = 0.2; // Point density grid resolution
+      const stepSize = 0.04; // EXTREME Point density grid resolution (approx 70k points)
 
       for(let x = minX; x <= maxX; x += stepSize) {
           for(let z = minZ; z <= maxZ; z += stepSize) {
@@ -541,8 +979,9 @@ const HologramPanel = ({ videoUrl, hovered, onSelect, data }) => {
 };
 
 // --- マーカー全体 ---
-const LocationMarker = ({ data, onSelect, onHoverChange, isTourActive }) => {
+const LocationMarker = ({ data, onSelect, onHoverChange, isTourActive, mobileActiveId, setMobileActiveId }) => {
   const [hovered, setHover] = useState(false);
+  const isTouch = typeof window !== 'undefined' && window.matchMedia('(hover: none) and (pointer: coarse)').matches;
   const position = useMemo(() => convertGeoToVector(data.lat, data.lng, true), [data]);
   const markerGroupRef = useRef();
   const ringGroupRef = useRef();
@@ -661,6 +1100,7 @@ const LocationMarker = ({ data, onSelect, onHoverChange, isTourActive }) => {
 
   const handlePointerOver = (e) => {
     e.stopPropagation();
+    if (isTouch) return; // Prevent glitchy hover on mobile
     setHover(true);
     if (onHoverChange) onHoverChange(data);
     document.body.style.cursor = 'pointer';
@@ -668,20 +1108,34 @@ const LocationMarker = ({ data, onSelect, onHoverChange, isTourActive }) => {
   
   const handlePointerOut = (e) => {
     e.stopPropagation();
+    if (isTouch) return; // Prevent glitchy hover on mobile
     setHover(false);
     if (onHoverChange) onHoverChange(null);
     document.body.style.cursor = 'default';
   };
 
+  const handleClick = (e) => {
+    e.stopPropagation();
+    if (isTouch) {
+      if (mobileActiveId !== data.id) {
+        setMobileActiveId(data.id);
+        if (onHoverChange) onHoverChange(data);
+        return; // Prevent select on first tap
+      }
+    }
+    // Normal click or 2nd mobile tap
+    onSelect(data);
+  };
+
   const markerColor = currentColor;
-  const isEffectivelyHovered = hovered || isTourActive;
+  const isEffectivelyHovered = (isTouch ? (mobileActiveId === data.id) : hovered) || isTourActive;
 
   return (
     <group position={position}>
       <group ref={markerGroupRef}>
         {/* Core crystal - icosahedron for artistic faceted look */}
         <mesh 
-          onClick={(e) => { e.stopPropagation(); onSelect(data); }}
+          onClick={handleClick}
           onPointerOver={handlePointerOver}
           onPointerOut={handlePointerOut}
         >
@@ -752,6 +1206,8 @@ const LocationMarker = ({ data, onSelect, onHoverChange, isTourActive }) => {
 export default function App() {
   const [selectedLocation, setSelectedLocation] = useState(null);
   const [hoveredLocation, setHoveredLocation] = useState(null);
+  const [mobileActiveId, setMobileActiveId] = useState(null);
+  const [glitchActive, setGlitchActive] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState("");
   const [sequence, setSequence] = useState([]);
   const [playbackIndex, setPlaybackIndex] = useState(0);
@@ -834,12 +1290,33 @@ export default function App() {
         const nextIdx = (idx + 1) % scrollableCategories.length;
         setCategoryFilter(scrollableCategories[nextIdx]);
         lastScrollTime.current = now;
+        triggerGlitch();
       } else if (e.deltaY < 0) {
         const prevIdx = (idx - 1 + scrollableCategories.length) % scrollableCategories.length;
         setCategoryFilter(scrollableCategories[prevIdx]);
         lastScrollTime.current = now;
+        triggerGlitch();
       }
     }
+  };
+
+  const triggerGlitch = () => {
+    setGlitchActive(true);
+    setTimeout(() => setGlitchActive(false), 200);
+  };
+
+  const handleCategoryClick = (e) => {
+    e.stopPropagation();
+    const idx = scrollableCategories.indexOf(categoryFilter);
+    const nextIdx = (idx + 1) % scrollableCategories.length;
+    setCategoryFilter(scrollableCategories[nextIdx]);
+    triggerGlitch();
+  };
+
+  const handleSelectLocation = (data) => {
+    setSequence([]); 
+    setSelectedLocation(data);
+    triggerGlitch();
   };
 
   const chronoSortedLocations = useMemo(() => {
@@ -865,9 +1342,13 @@ export default function App() {
     <div className="container">
       <Canvas
         dpr={[1, 2]}
-        style={{ position: 'absolute', top: 0, left: 0, width: '100vw', height: '100vh', zIndex: 1 }}
+        style={{ position: 'absolute', top: 0, left: 0, width: '100vw', height: '100dvh', zIndex: 1 }}
         camera={{ position: [0, 20, 25], fov: 45 }}
         gl={{ antialias: true, stencil: false, depth: true }}
+        onPointerMissed={() => {
+           setMobileActiveId(null);
+           setHoveredLocation(null);
+        }}
       >
         <CameraDrift hoveredLocation={centralFocus} isIdle={isIdle} />
         
@@ -891,7 +1372,10 @@ export default function App() {
         />
 
         <group>
+           <DigitalOcean />
            <WorldMapShape activeLocation={centralFocus} globalCategory={categoryFilter} />
+           
+           {categoryFilter !== "" && <ConstellationEffect activeLocations={chronoSortedLocations} />}
            
            {clockMode > 0 && (
              <TimelineEffect locations={chronoSortedLocations} />
@@ -904,23 +1388,17 @@ export default function App() {
                   key={loc.id}  
                   data={loc} 
                   isTourActive={activeTourLocation && activeTourLocation.id === loc.id}
+                  mobileActiveId={mobileActiveId}
+                  setMobileActiveId={setMobileActiveId}
                   onHoverChange={(data) => {
                     if (sequence.length === 0) setHoveredLocation(data);
                   }}
-                  onSelect={(data) => {
-                    setSequence([]); 
-                    setSelectedLocation(data);
-                  }} 
+                  onSelect={handleSelectLocation} 
                 />
            ))}
         </group>
 
-        {/* Temporarily disabled to isolate blur source
-        <EffectComposer disableNormalPass>
-          <Bloom luminanceThreshold={0.99} intensity={1.5} mipmapBlur />
-          <Noise opacity={0.01} />
-        </EffectComposer>
-        */}
+        <SceneEffects glitchActive={glitchActive} />
 
         <MapControls 
           makeDefault
@@ -936,19 +1414,24 @@ export default function App() {
       </Canvas>
 
       <motion.div 
-        style={{ pointerEvents: 'auto', position: 'absolute', bottom: '30px', left: '30px', zIndex: 10 }}
+        className="category-selector"
+        style={{ pointerEvents: 'auto', zIndex: 10 }}
         initial={{ opacity: 0, y: 50 }}
         animate={{ opacity: 1, y: 0 }}
         onWheel={handleCategoryWheel}
-        title="上下にスクロールしてカテゴリーを変更"
+        onClick={handleCategoryClick}
+        title="クリックまたはスクロールでカテゴリーを変更"
       >
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+          <div style={{ color: '#fff', fontSize: '13px', fontWeight: 'bold', textShadow: '0 0 5px #000', whiteSpace: 'nowrap' }}>
+            {categoryFilter === "" ? "全てのカテゴリー" : categoryFilter}
+          </div>
           <div 
             style={{ 
                width: '64px', height: '64px', borderRadius: '50%',
                background: 'rgba(0,0,0,0.7)', 
                color: '#fff', 
-               cursor: 'ns-resize', 
+               cursor: 'pointer', 
                border: `2px solid ${categoryFilter ? (categoryColors[categoryFilter] || '#00ffff') : '#00ffff'}`, 
                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '32px',
                boxShadow: `0 0 15px ${categoryFilter ? (categoryColors[categoryFilter] || '#00ffff') : '#00ffff'}`,
@@ -966,9 +1449,6 @@ export default function App() {
                  {categoryIcons[categoryFilter] || "📍"} 
                </motion.div>
              </AnimatePresence>
-          </div>
-          <div style={{ color: '#fff', fontSize: '13px', fontWeight: 'bold', textShadow: '0 0 5px #000', whiteSpace: 'nowrap' }}>
-            {categoryFilter === "" ? "全てのカテゴリー" : categoryFilter}
           </div>
         </div>
       </motion.div>
@@ -1026,8 +1506,9 @@ export default function App() {
       {/* 右下の時計アイコン (時系列・自動ツアー トグル) */}
       <div 
         onClick={() => setClockMode(prev => (prev + 1) % 3)} 
+        className="clock-button"
         style={{
-          position: 'absolute', bottom: '30px', right: '30px', zIndex: 10,
+          zIndex: 10,
           backgroundColor: clockMode === 2 ? 'rgba(70, 0, 255, 0.4)' : clockMode === 1 ? 'rgba(0, 255, 255, 0.3)' : 'rgba(0, 0, 0, 0.6)',
           border: '1px solid #00ffff', borderRadius: '50%', padding: '15px', cursor: 'pointer',
           boxShadow: clockMode === 2 ? '0 0 15px rgba(200, 50, 255, 0.6)' : clockMode === 1 ? '0 0 15px rgba(0, 255, 255, 0.5)' : '0 0 10px rgba(0, 100, 255, 0.2)',

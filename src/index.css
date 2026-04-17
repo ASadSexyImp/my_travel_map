@@ -7,8 +7,8 @@
 }
 
 body, html, #root {
-  width: 100%;
-  height: 100%;
+  width: 100vw;
+  height: 100dvh;
   margin: 0;
   padding: 0;
   overflow: hidden;
@@ -16,31 +16,33 @@ body, html, #root {
 }
 
 /* ホログラム特有のスキャンラインエフェクト */
-/* Temporarily disabled to rule out haze source
 body::after {
   content: "";
   position: absolute;
   top: 0;
   left: 0;
   width: 100vw;
-  height: 100vh;
+  height: 100dvh;
   background: linear-gradient(
     to bottom,
     rgba(255, 255, 255, 0),
     rgba(255, 255, 255, 0) 50%,
-    rgba(0, 255, 255, 0.02) 50%,
-    rgba(0, 255, 255, 0.02) 100%
+    rgba(0, 255, 255, 0.04) 50%,
+    rgba(0, 255, 255, 0.04) 100%
   );
   background-size: 100% 4px;
   pointer-events: none;
   z-index: 9999;
 }
-*/
 
 .container {
-  width: 100%;
-  height: 100vh;
-  position: relative;
+  width: 100vw;
+  height: 100dvh;
+  /* iOS Safari safe fallback */
+  min-height: -webkit-fill-available;
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
 }
 
 /* UIレイヤー */
@@ -220,4 +222,116 @@ h1 {
   background: rgba(0, 255, 255, 0.2);
   box-shadow: 0 0 20px rgba(0, 255, 255, 0.6);
   text-shadow: 0 0 5px #fff;
+}
+
+/* Base positions for bottom controls using safe area insets */
+.category-selector {
+  position: absolute;
+  bottom: max(30px, env(safe-area-inset-bottom) + 15px);
+  left: max(30px, env(safe-area-inset-left) + 15px);
+  z-index: 10;
+}
+
+.clock-button {
+  position: absolute;
+  bottom: max(30px, env(safe-area-inset-bottom) + 15px);
+  right: max(30px, env(safe-area-inset-right) + 15px);
+  z-index: 10;
+}
+
+/* Responsive Styles */
+@media (max-width: 900px) {
+  .modal-content {
+    width: 80vw;
+  }
+}
+
+@media (max-width: 768px) {
+  .ui-layer {
+    top: 20px;
+    left: 20px;
+    padding: 1rem 1.5rem;
+    max-width: 70%;
+  }
+
+  h1 {
+    font-size: 1.6rem;
+  }
+
+  .controls-panel {
+    top: 20px;
+    right: 20px;
+    padding: 10px 15px;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .modal-content {
+    width: 90vw;
+    min-width: unset;
+    padding: 20px;
+    max-height: 85vh;
+  }
+
+  .modal-content h2 {
+    font-size: 1.3rem;
+    padding-bottom: 10px;
+  }
+
+  .video-wrapper {
+    margin: 10px 0;
+  }
+
+  .close-btn {
+    width: 100%;
+    margin-top: 10px;
+    float: none;
+  }
+
+  .tooltip {
+    font-size: 0.8rem;
+    padding: 4px 8px;
+  }
+  .category-selector {
+    bottom: max(20px, env(safe-area-inset-bottom) + 10px);
+    left: max(20px, env(safe-area-inset-left) + 10px);
+  }
+
+  .clock-button {
+    bottom: max(20px, env(safe-area-inset-bottom) + 10px);
+    right: max(20px, env(safe-area-inset-right) + 10px);
+  }
+}
+
+@media (max-width: 480px) {
+  h1 {
+    font-size: 1.2rem;
+  }
+
+  .ui-layer {
+    padding: 0.8rem 1rem;
+    max-width: 60%;
+  }
+
+  .controls-panel {
+    display: none; /* Hide advanced controls on very small screens to save space */
+  }
+
+  .modal-content {
+    width: 95vw;
+    padding: 15px;
+  }
+
+  .modal-content h2 {
+    font-size: 1.1rem;
+  }
+  .category-selector {
+    bottom: max(15px, env(safe-area-inset-bottom) + 8px);
+    left: max(15px, env(safe-area-inset-left) + 8px);
+  }
+
+  .clock-button {
+    bottom: max(15px, env(safe-area-inset-bottom) + 8px);
+    right: max(15px, env(safe-area-inset-right) + 8px);
+  }
 }

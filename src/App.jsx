@@ -364,17 +364,17 @@ const mapShaderMaterial = new THREE.ShaderMaterial({
 });
 
 const DigitalOcean = () => {
-    // Generate a massive 2D grid
+    // Generate a massive 2D grid with higher density
     const geometry = useMemo(() => {
-        const minX = -60, maxX = 60;
-        const minZ = -60, maxZ = 60;
-        const step = 0.6; // About 40,000 particles
+        const minX = -70, maxX = 70;
+        const minZ = -70, maxZ = 70;
+        const step = 0.45; // Higher density ~96,000 particles
         const newPoints = [];
         const rands = [];
         
         for(let x=minX; x<=maxX; x+=step) {
             for(let z=minZ; z<=maxZ; z+=step) {
-                newPoints.push(x, -1.0, z); // Y=-1.0 to place it below the Japan map
+                newPoints.push(x, -1.5, z);
                 rands.push(Math.random());
             }
         }
@@ -402,8 +402,11 @@ const DigitalOcean = () => {
             attribute float aRand;
             varying float vAlpha;
             varying vec3 vColor;
+            varying float vHeightRatio;
+            varying float vCaustic;
+            varying vec2 vWorldXZ;
             
-            // Simplex Noise
+            // ---- Simplex 3D Noise ----
             vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x, 289.0);}
             vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
             float snoise(vec3 v){ 
@@ -452,78 +455,146 @@ const DigitalOcean = () => {
                 return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
             }
 
-            // Curl Noise for Fluid Dynamics
-            vec3 snoiseVec3( vec3 x ){
-                float s  = snoise(vec3( x ));
-                float s1 = snoise(vec3( x.y - 19.1, x.z + 33.4, x.x + 47.2 ));
-                float s2 = snoise(vec3( x.z + 74.2, x.x - 124.5, x.y + 99.4 ));
-                return vec3( s, s1, s2 );
+            // ---- Multi-octave FBM (Fractal Brownian Motion) for realistic ocean ----
+            float fbm(vec3 p) {
+                float value = 0.0;
+                float amplitude = 0.5;
+                float frequency = 1.0;
+                for (int i = 0; i < 5; i++) {
+                    value += amplitude * snoise(p * frequency);
+                    frequency *= 2.2;
+                    amplitude *= 0.45;
+                }
+                return value;
             }
-            
-            vec3 curlNoise( vec3 p ){
-                const float e = 0.1;
-                vec3 dx = vec3( e   , 0.0 , 0.0 );
-                vec3 dy = vec3( 0.0 , e   , 0.0 );
-                vec3 dz = vec3( 0.0 , 0.0 , e   );
 
-                vec3 p_x0 = snoiseVec3( p - dx );
-                vec3 p_x1 = snoiseVec3( p + dx );
-                vec3 p_y0 = snoiseVec3( p - dy );
-                vec3 p_y1 = snoiseVec3( p + dy );
-                vec3 p_z0 = snoiseVec3( p - dz );
-                vec3 p_z1 = snoiseVec3( p + dz );
+            // ---- Gerstner Wave (circular orbital motion like real ocean waves) ----
+            vec3 gerstnerWave(vec2 pos, float steepness, float wavelength, vec2 direction, float t) {
+                float k = 6.28318 / wavelength;
+                float speed = sqrt(9.8 / k); // Gravity-based dispersion
+                float phase = k * (dot(direction, pos) - speed * t);
+                float a = steepness / k;
+                return vec3(
+                    direction.x * a * cos(phase),
+                    a * sin(phase),
+                    direction.y * a * cos(phase)
+                );
+            }
 
-                float x = p_y1.z - p_y0.z - p_z1.y + p_z0.y;
-                float y = p_z1.x - p_z0.x - p_x1.z + p_x0.z;
-                float z = p_x1.y - p_x0.y - p_y1.x + p_y0.x;
-
-                const float divisor = 1.0 / ( 2.0 * e );
-                return normalize( vec3( x , y , z ) * divisor );
+            // ---- Cosine palette for neon color ----
+            vec3 palette(float t, vec3 a, vec3 b, vec3 c, vec3 d) {
+                return a + b * cos(6.28318 * (c * t + d));
             }
 
             void main() {
                 vec3 pos = position;
+                float t = time;
+                vWorldXZ = pos.xz;
                 
-                // Extremely organic fluid flow using Curl Noise
-                vec3 curl = curlNoise(vec3(pos.x * 0.05, pos.y, pos.z * 0.05) + time * 0.15);
+                // === Layer 1: Multi-directional Gerstner Waves (realistic swells) ===
+                vec3 wave1 = gerstnerWave(pos.xz, 0.25, 12.0, normalize(vec2(1.0, 0.6)), t * 0.8);
+                vec3 wave2 = gerstnerWave(pos.xz, 0.15, 8.0, normalize(vec2(-0.7, 1.0)), t * 1.1);
+                vec3 wave3 = gerstnerWave(pos.xz, 0.10, 5.0, normalize(vec2(0.3, -0.8)), t * 1.4);
+                vec3 wave4 = gerstnerWave(pos.xz, 0.08, 3.5, normalize(vec2(-1.0, -0.3)), t * 1.8);
                 
-                // Displacement
-                pos.x += curl.x * 2.5;
-                pos.z += curl.z * 2.5;
+                vec3 totalWave = wave1 + wave2 + wave3 + wave4;
+                pos += totalWave;
                 
-                // Elevation affected by the fluid turbulence
-                pos.y += curl.y * 1.8;
+                // === Layer 2: FBM turbulence (organic roughness) ===
+                float turbulence = fbm(vec3(pos.x * 0.08, pos.z * 0.08, t * 0.15));
+                pos.y += turbulence * 0.6;
                 
-                // Base slow swell layer
-                float wave = sin(pos.x * 0.1 + time * 0.5) * cos(pos.z * 0.1 + time * 0.3) * 0.4;
-                pos.y += wave;
+                // === Layer 3: Very slow deep swell ===
+                float deepSwell = sin(pos.x * 0.03 + t * 0.2) * cos(pos.z * 0.025 + t * 0.15) * 1.2;
+                pos.y += deepSwell;
                 
-                // Color variation by elevation
-                float heightRatio = clamp((pos.y + 1.0) * 0.5 + 0.2, 0.0, 1.0);
-                vec3 colDark = vec3(0.01, 0.04, 0.15);    // Deep abyssal void
-                vec3 colLight = vec3(0.0, 0.9, 1.0);      // High energy cyan
-                vColor = mix(colDark, colLight, heightRatio * (0.5 + aRand * 0.5));
+                // === Calculate height ratio (normalized -2..3 range) ===
+                float heightRatio = clamp((pos.y + 2.0) / 5.0, 0.0, 1.0);
+                vHeightRatio = heightRatio;
+
+                // === Neon Caustic pattern (underwater light refraction) ===
+                float caustic1 = abs(snoise(vec3(pos.x * 0.3, pos.z * 0.3, t * 0.6)));
+                float caustic2 = abs(snoise(vec3(pos.x * 0.5 + 50.0, pos.z * 0.5 + 50.0, t * 0.8)));
+                vCaustic = pow(caustic1 * caustic2, 0.6);
+                
+                // === Color: Deep Neon Ocean Palette ===
+                // Cosine palette transitions: deep violet -> midnight blue -> teal -> cyan -> white foam
+                vec3 neonColor = palette(
+                    heightRatio * 0.8 + turbulence * 0.2 + aRand * 0.1,
+                    vec3(0.02, 0.05, 0.15),  // Base: near-black deep
+                    vec3(0.15, 0.4, 0.5),    // Amplitude
+                    vec3(1.0, 0.8, 0.6),     // Frequency
+                    vec3(0.6, 0.3, 0.7)      // Phase: violet-teal shift
+                );
+                
+                // Add hot neon highlights on wave crests
+                float crestGlow = smoothstep(0.6, 0.9, heightRatio);
+                vec3 neonCyan = vec3(0.0, 1.0, 0.95);
+                vec3 neonMagenta = vec3(0.8, 0.1, 1.0);
+                vec3 crestColor = mix(neonCyan, vec3(1.0), crestGlow * 0.5); // White-hot foam tips
+                
+                // Neon underglow from below (purple/magenta subsurface scatter)
+                float depthGlow = smoothstep(0.4, 0.0, heightRatio);
+                vec3 subSurfaceNeon = mix(vec3(0.05, 0.0, 0.2), neonMagenta, depthGlow * 0.6);
+                
+                vColor = neonColor + crestColor * crestGlow * 1.5 + subSurfaceNeon * depthGlow;
+                
+                // Add caustic shimmer
+                vColor += vec3(0.0, 0.3, 0.5) * vCaustic * (1.0 - heightRatio) * 0.8;
                 
                 vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
                 gl_Position = projectionMatrix * mvPosition;
                 
-                // Responsive point sizing - brighter points are larger
-                gl_PointSize = (1.5 + heightRatio * 2.5 + aRand * 1.5) * (18.0 / -mvPosition.z);
+                // Point size: foam/crest particles are bigger and brighter
+                float baseSize = 1.2 + aRand * 0.8;
+                float crestSize = crestGlow * 3.0;
+                float causticSize = vCaustic * 1.5 * (1.0 - heightRatio);
+                gl_PointSize = (baseSize + crestSize + causticSize) * (20.0 / -mvPosition.z);
                 
-                // Seamless radial fade
-                float dist = length(pos.xz);
-                float edgeFade = smoothstep(55.0, 20.0, dist);
-                vAlpha = edgeFade * (0.05 + heightRatio * 0.7); 
+                // Fade: edges + deep troughs are more transparent
+                float dist = length(position.xz); // Use original position for consistent fade
+                float edgeFade = smoothstep(65.0, 15.0, dist);
+                float depthFade = 0.08 + heightRatio * 0.7 + crestGlow * 0.3;
+                vAlpha = edgeFade * depthFade;
             }
         `,
         fragmentShader: `
             varying float vAlpha;
             varying vec3 vColor;
+            varying float vHeightRatio;
+            varying float vCaustic;
+            varying vec2 vWorldXZ;
+            
             void main() {
                 vec2 xy = gl_PointCoord.xy - vec2(0.5);
                 float ll = length(xy);
-                if(ll > 0.5) discard;
-                gl_FragColor = vec4(vColor, vAlpha * pow(1.0 - ll * 2.0, 2.0));
+                if (ll > 0.5) discard;
+                
+                // Soft radial falloff
+                float softEdge = pow(1.0 - ll * 2.0, 1.5);
+                
+                // Fresnel-style edge brightening (neon glow ring around particles)
+                float fresnelRing = smoothstep(0.25, 0.48, ll) * smoothstep(0.5, 0.45, ll);
+                
+                // Neon core glow for crest particles
+                float coreGlow = exp(-ll * 8.0) * vHeightRatio;
+                
+                vec3 finalColor = vColor;
+                
+                // Add bright neon ring to foam/crest particles
+                float isCrest = smoothstep(0.55, 0.85, vHeightRatio);
+                finalColor += vec3(0.2, 0.8, 1.0) * fresnelRing * isCrest * 2.0;
+                
+                // Hot white-cyan core for brightest crests
+                finalColor += vec3(0.5, 0.9, 1.0) * coreGlow * 1.5;
+                
+                // Caustic shimmer in deeper areas (neon underwater light)
+                float causticFlicker = vCaustic * (1.0 - vHeightRatio);
+                finalColor += vec3(0.1, 0.4, 0.8) * causticFlicker * softEdge * 0.6;
+                
+                float alpha = vAlpha * softEdge + fresnelRing * isCrest * 0.15 + coreGlow * 0.2;
+                
+                gl_FragColor = vec4(finalColor, clamp(alpha, 0.0, 1.0));
             }
         `,
         transparent: true,
